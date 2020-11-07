@@ -25,6 +25,7 @@ import io.netty.channel.embedded.EmbeddedChannel;
 import io.netty.handler.codec.mqtt.MqttConnectMessage;
 import io.netty.handler.codec.mqtt.MqttMessageBuilders;
 import io.netty.handler.codec.mqtt.MqttVersion;
+import org.junit.Assert;
 import org.junit.Before;
 import org.junit.Test;
 
@@ -32,6 +33,7 @@ import static io.moquette.broker.NettyChannelAssertions.assertEqualsConnAck;
 import static io.netty.handler.codec.mqtt.MqttConnectReturnCode.CONNECTION_ACCEPTED;
 import static java.util.Collections.singleton;
 import static java.util.Collections.singletonMap;
+import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
 
@@ -94,10 +96,10 @@ public class SessionRegistryTest {
         // Exercise, reconnect
         EmbeddedChannel anotherChannel = new EmbeddedChannel();
         MQTTConnection anotherConnection = createMQTTConnection(ALLOW_ANONYMOUS_AND_ZEROBYTE_CLIENT_ID, anotherChannel);
-        sut.bindToSession(anotherConnection, msg, FAKE_CLIENT_ID);
+        final SessionRegistry.SessionCreationResult result = sut.bindToSession(anotherConnection, msg, FAKE_CLIENT_ID);
 
         // Verify
-        assertEqualsConnAck(CONNECTION_ACCEPTED, anotherChannel.readOutbound());
+        assertEquals(SessionRegistry.CreationModeEnum.CREATED_CLEAN_NEW, result.mode);
         assertTrue("Connection is accepted and therefore should remain open", anotherChannel.isOpen());
     }
 

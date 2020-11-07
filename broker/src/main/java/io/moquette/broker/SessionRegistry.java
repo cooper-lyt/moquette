@@ -55,10 +55,6 @@ public class SessionRegistry {
     static final class PubRelMarker extends EnqueuedMessage {
     }
 
-    private enum PostConnectAction {
-        NONE, SEND_STORED_MESSAGES
-    }
-
     private static final Logger LOG = LoggerFactory.getLogger(SessionRegistry.class);
 
     private final ConcurrentMap<String, Session> pool = new ConcurrentHashMap<>();
@@ -75,12 +71,12 @@ public class SessionRegistry {
         this.authorizator = authorizator;
     }
 
-    void bindToSession(MQTTConnection mqttConnection, MqttConnectMessage msg, String clientId) {
-        boolean isSessionAlreadyStored = false;
-        PostConnectAction postConnectAction = PostConnectAction.NONE;
+    SessionCreationResult bindToSession(MQTTConnection mqttConnection, MqttConnectMessage msg, String clientId) {
+        SessionCreationResult postConnectAction;
         if (!pool.containsKey(clientId)) {
             // case 1
-            final Session newSession = createNewSession(mqttConnection, msg, clientId);
+            final Session newSession = createNewSession(msg, clientId);
+            postConnectAction = new SessionCreationResult(newSession, CreationModeEnum.CREATED_CLEAN_NEW, false);
 
             // publish the session
             final Session previous = pool.putIfAbsent(clientId, newSession);
@@ -89,29 +85,39 @@ public class SessionRegistry {
             if (success) {
                 LOG.trace("case 1, not existing session with CId {}", clientId);
             } else {
-                postConnectAction = bindToExistingSession(mqttConnection, msg, clientId, newSession);
-                isSessionAlreadyStored = true;
+                postConnectAction = bindToExistingSession(msg, clientId, newSession, mqttConnection.getUsername());
             }
         } else {
-            final Session newSession = createNewSession(mqttConnection, msg, clientId);
-            postConnectAction = bindToExistingSession(mqttConnection, msg, clientId, newSession);
-            isSessionAlreadyStored = true;
+            final Session newSession = createNewSession(msg, clientId);
+            postConnectAction = bindToExistingSession(msg, clientId, newSession, mqttConnection.getUsername());
         }
-        final boolean msgCleanSessionFlag = msg.variableHeader().isCleanSession();
-        boolean isSessionAlreadyPresent = !msgCleanSessionFlag && isSessionAlreadyStored;
-        mqttConnection.sendConnAck(isSessionAlreadyPresent);
+        return postConnectAction;
+    }
 
-        if (postConnectAction == PostConnectAction.SEND_STORED_MESSAGES) {
-            final Session session = pool.get(clientId);
-            session.sendQueuedMessagesWhileOffline();
+    public enum CreationModeEnum {
+        NOT_CREATED, CREATED_CLEAN_NEW, REOPEN_EXISTING, DROP_EXISTING;
+    }
+
+    public static class SessionCreationResult {
+
+        final static SessionCreationResult NONE = new SessionCreationResult(null, CreationModeEnum.NOT_CREATED, false);
+
+        final Session session;
+        final CreationModeEnum mode;
+        final boolean alreadyStored;
+
+        public SessionCreationResult(Session session, CreationModeEnum mode, boolean alreadyStored) {
+            this.session = session;
+            this.mode = mode;
+            this.alreadyStored = alreadyStored;
         }
     }
 
-    private PostConnectAction bindToExistingSession(MQTTConnection mqttConnection, MqttConnectMessage msg,
-                                                    String clientId, Session newSession) {
-        PostConnectAction postConnectAction = PostConnectAction.NONE;
+    private SessionCreationResult bindToExistingSession(MqttConnectMessage msg, String clientId,
+                                                        Session newSession, String username) {
         final boolean newIsClean = msg.variableHeader().isCleanSession();
         final Session oldSession = pool.get(clientId);
+        SessionCreationResult creationResult = SessionCreationResult.NONE;
         if (newIsClean && oldSession.disconnected()) {
             // case 2
             dropQueuesForClient(clientId);
@@ -123,54 +129,40 @@ public class SessionRegistry {
                 throw new SessionCorruptedException("old session was already changed state");
             }
             copySessionConfig(msg, oldSession);
-            oldSession.bind(mqttConnection);
-
-            result = oldSession.assignState(SessionStatus.CONNECTING, SessionStatus.CONNECTED);
-            if (!result) {
-                throw new SessionCorruptedException("old session moved in connected state by other thread");
-            }
-            final boolean published = pool.replace(clientId, oldSession, oldSession);
-            if (!published) {
-                throw new SessionCorruptedException("old session was already removed");
-            }
             LOG.trace("case 2, oldSession with same CId {} disconnected", clientId);
+            creationResult = new SessionCreationResult(oldSession, CreationModeEnum.CREATED_CLEAN_NEW, true);
         } else if (!newIsClean && oldSession.disconnected()) {
-            // case 3
-            final String username = mqttConnection.getUsername();
-            reactivateSubscriptions(oldSession, username);
-
-            // mark as connected
             final boolean connecting = oldSession.assignState(SessionStatus.DISCONNECTED, SessionStatus.CONNECTING);
             if (!connecting) {
                 throw new SessionCorruptedException("old session moved in connected state by other thread");
             }
-            oldSession.bind(mqttConnection);
+            // case 3
+            reactivateSubscriptions(oldSession, username);
 
-            final boolean connected = oldSession.assignState(SessionStatus.CONNECTING, SessionStatus.CONNECTED);
-            if (!connected) {
-                throw new SessionCorruptedException("old session moved in other state state by other thread");
-            }
-
-            // publish new session
-            final boolean published = pool.replace(clientId, oldSession, oldSession);
-            if (!published) {
-                throw new SessionCorruptedException("old session was already removed");
-            }
-            postConnectAction = PostConnectAction.SEND_STORED_MESSAGES;
             LOG.trace("case 3, oldSession with same CId {} disconnected", clientId);
+            creationResult = new SessionCreationResult(oldSession, CreationModeEnum.REOPEN_EXISTING, true);
         } else if (oldSession.connected()) {
             // case 4
             LOG.trace("case 4, oldSession with same CId {} still connected, force to close", clientId);
             oldSession.closeImmediately();
             //remove(clientId);
-            // publish new session
-            final boolean published = pool.replace(clientId, oldSession, newSession);
+            creationResult = new SessionCreationResult(newSession, CreationModeEnum.DROP_EXISTING, true);
+        }
+
+        if (creationResult != SessionCreationResult.NONE) {
+            final boolean published;
+            if (creationResult.mode == CreationModeEnum.DROP_EXISTING) {
+                published = pool.replace(clientId, oldSession, newSession);
+            } else {
+                published = pool.replace(clientId, oldSession, oldSession);
+            }
             if (!published) {
                 throw new SessionCorruptedException("old session was already removed");
             }
         }
+
         // case not covered new session is clean true/false and old session not in CONNECTED/DISCONNECTED
-        return postConnectAction;
+        return creationResult;
     }
 
     private void reactivateSubscriptions(Session session, String username) {
@@ -192,7 +184,7 @@ public class SessionRegistry {
         }
     }
 
-    private Session createNewSession(MQTTConnection mqttConnection, MqttConnectMessage msg, String clientId) {
+    private Session createNewSession(MqttConnectMessage msg, String clientId) {
         final boolean clean = msg.variableHeader().isCleanSession();
         final Queue<SessionRegistry.EnqueuedMessage> sessionQueue =
                     queues.computeIfAbsent(clientId, (String cli) -> queueRepository.createQueue(cli, clean));
@@ -204,9 +196,7 @@ public class SessionRegistry {
             newSession = new Session(clientId, clean, sessionQueue);
         }
 
-        newSession.markConnected();
-        newSession.bind(mqttConnection);
-
+        newSession.markConnecting();
         return newSession;
     }
 
