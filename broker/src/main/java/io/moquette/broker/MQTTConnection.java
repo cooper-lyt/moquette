@@ -28,7 +28,6 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.net.InetSocketAddress;
-import java.nio.charset.StandardCharsets;
 import java.util.*;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -168,7 +167,7 @@ final class MQTTConnection {
         final SessionRegistry.SessionCreationResult result;
         try {
             LOG.trace("Binding MQTTConnection (channel: {}) to session", channel);
-            result = sessionRegistry.bindToSession(this, msg, clientId);
+            result = sessionRegistry.createOrReopenSession(msg, clientId, this.getUsername());
             if (result.mode ==  SessionRegistry.CreationModeEnum.CREATED_CLEAN_NEW ||
                 result.mode ==  SessionRegistry.CreationModeEnum.REOPEN_EXISTING ||
                 result.mode ==  SessionRegistry.CreationModeEnum.DROP_EXISTING) {
@@ -208,6 +207,7 @@ final class MQTTConnection {
                         LOG.trace("dispatch connection: {}", msg.toString());
                     }
                 } else {
+                    //TODO close the session
                     future.channel().pipeline().fireExceptionCaught(future.cause());
                 }
 

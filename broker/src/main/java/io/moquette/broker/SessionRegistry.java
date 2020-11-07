@@ -55,45 +55,6 @@ public class SessionRegistry {
     static final class PubRelMarker extends EnqueuedMessage {
     }
 
-    private static final Logger LOG = LoggerFactory.getLogger(SessionRegistry.class);
-
-    private final ConcurrentMap<String, Session> pool = new ConcurrentHashMap<>();
-    private final ISubscriptionsDirectory subscriptionsDirectory;
-    private final IQueueRepository queueRepository;
-    private final Authorizator authorizator;
-    private final ConcurrentMap<String, Queue<SessionRegistry.EnqueuedMessage>> queues = new ConcurrentHashMap<>();
-
-    SessionRegistry(ISubscriptionsDirectory subscriptionsDirectory,
-                    IQueueRepository queueRepository,
-                    Authorizator authorizator) {
-        this.subscriptionsDirectory = subscriptionsDirectory;
-        this.queueRepository = queueRepository;
-        this.authorizator = authorizator;
-    }
-
-    SessionCreationResult bindToSession(MQTTConnection mqttConnection, MqttConnectMessage msg, String clientId) {
-        SessionCreationResult postConnectAction;
-        if (!pool.containsKey(clientId)) {
-            // case 1
-            final Session newSession = createNewSession(msg, clientId);
-            postConnectAction = new SessionCreationResult(newSession, CreationModeEnum.CREATED_CLEAN_NEW, false);
-
-            // publish the session
-            final Session previous = pool.putIfAbsent(clientId, newSession);
-            final boolean success = previous == null;
-
-            if (success) {
-                LOG.trace("case 1, not existing session with CId {}", clientId);
-            } else {
-                postConnectAction = bindToExistingSession(msg, clientId, newSession, mqttConnection.getUsername());
-            }
-        } else {
-            final Session newSession = createNewSession(msg, clientId);
-            postConnectAction = bindToExistingSession(msg, clientId, newSession, mqttConnection.getUsername());
-        }
-        return postConnectAction;
-    }
-
     public enum CreationModeEnum {
         NOT_CREATED, CREATED_CLEAN_NEW, REOPEN_EXISTING, DROP_EXISTING;
     }
@@ -113,7 +74,46 @@ public class SessionRegistry {
         }
     }
 
-    private SessionCreationResult bindToExistingSession(MqttConnectMessage msg, String clientId,
+    private static final Logger LOG = LoggerFactory.getLogger(SessionRegistry.class);
+
+    private final ConcurrentMap<String, Session> pool = new ConcurrentHashMap<>();
+    private final ISubscriptionsDirectory subscriptionsDirectory;
+    private final IQueueRepository queueRepository;
+    private final Authorizator authorizator;
+    private final ConcurrentMap<String, Queue<SessionRegistry.EnqueuedMessage>> queues = new ConcurrentHashMap<>();
+
+    SessionRegistry(ISubscriptionsDirectory subscriptionsDirectory,
+                    IQueueRepository queueRepository,
+                    Authorizator authorizator) {
+        this.subscriptionsDirectory = subscriptionsDirectory;
+        this.queueRepository = queueRepository;
+        this.authorizator = authorizator;
+    }
+
+    SessionCreationResult createOrReopenSession(MqttConnectMessage msg, String clientId, String username) {
+        SessionCreationResult postConnectAction;
+        if (!pool.containsKey(clientId)) {
+            // case 1
+            final Session newSession = createNewSession(msg, clientId);
+            postConnectAction = new SessionCreationResult(newSession, CreationModeEnum.CREATED_CLEAN_NEW, false);
+
+            // publish the session
+            final Session previous = pool.putIfAbsent(clientId, newSession);
+            final boolean success = previous == null;
+
+            if (success) {
+                LOG.trace("case 1, not existing session with CId {}", clientId);
+            } else {
+                postConnectAction = reopenExistingSession(msg, clientId, newSession, username);
+            }
+        } else {
+            final Session newSession = createNewSession(msg, clientId);
+            postConnectAction = reopenExistingSession(msg, clientId, newSession, username);
+        }
+        return postConnectAction;
+    }
+
+    private SessionCreationResult reopenExistingSession(MqttConnectMessage msg, String clientId,
                                                         Session newSession, String username) {
         final boolean newIsClean = msg.variableHeader().isCleanSession();
         final Session oldSession = pool.get(clientId);

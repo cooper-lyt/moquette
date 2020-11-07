@@ -25,7 +25,6 @@ import io.netty.channel.embedded.EmbeddedChannel;
 import io.netty.handler.codec.mqtt.MqttConnectMessage;
 import io.netty.handler.codec.mqtt.MqttMessageBuilders;
 import io.netty.handler.codec.mqtt.MqttVersion;
-import org.junit.Assert;
 import org.junit.Before;
 import org.junit.Test;
 
@@ -89,14 +88,14 @@ public class SessionRegistryTest {
         NettyUtils.cleanSession(channel, false);
 
         // Connect a first time
-        sut.bindToSession(connection, msg, FAKE_CLIENT_ID);
+        sut.createOrReopenSession(msg, FAKE_CLIENT_ID, connection.getUsername());
         // disconnect
         sut.disconnect(FAKE_CLIENT_ID);
 
         // Exercise, reconnect
         EmbeddedChannel anotherChannel = new EmbeddedChannel();
         MQTTConnection anotherConnection = createMQTTConnection(ALLOW_ANONYMOUS_AND_ZEROBYTE_CLIENT_ID, anotherChannel);
-        final SessionRegistry.SessionCreationResult result = sut.bindToSession(anotherConnection, msg, FAKE_CLIENT_ID);
+        final SessionRegistry.SessionCreationResult result = sut.createOrReopenSession(msg, FAKE_CLIENT_ID, anotherConnection.getUsername());
 
         // Verify
         assertEquals(SessionRegistry.CreationModeEnum.CREATED_CLEAN_NEW, result.mode);
